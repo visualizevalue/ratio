@@ -19,7 +19,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Ratio reads the active browser tab hostname to distinguish consuming sites from creation tools. URLs are not saved.</string>
+	<string>Ratio reads open browser tabs so you can classify individual pages under their browser. Only the active page accumulates time. Page titles and full URLs are not saved.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>SUAutomaticallyUpdate</key>
