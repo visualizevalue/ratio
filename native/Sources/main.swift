@@ -134,6 +134,17 @@ func drawBackArrow(in bounds: NSRect, color: NSColor) {
     color.setStroke(); p.stroke()
 }
 
+func drawSortArrows(in bounds: NSRect, color: NSColor) {
+    let p = NSBezierPath()
+    p.lineWidth = 1.6; p.lineCapStyle = .round; p.lineJoinStyle = .round
+    let x = bounds.midX
+    p.move(to: NSPoint(x: x, y: bounds.midY + 1.5)); p.line(to: NSPoint(x: x, y: bounds.midY + 8))
+    p.move(to: NSPoint(x: x - 4.5, y: bounds.midY + 3.5)); p.line(to: NSPoint(x: x, y: bounds.midY + 8)); p.line(to: NSPoint(x: x + 4.5, y: bounds.midY + 3.5))
+    p.move(to: NSPoint(x: x, y: bounds.midY - 1.5)); p.line(to: NSPoint(x: x, y: bounds.midY - 8))
+    p.move(to: NSPoint(x: x - 4.5, y: bounds.midY - 3.5)); p.line(to: NSPoint(x: x, y: bounds.midY - 8)); p.line(to: NSPoint(x: x + 4.5, y: bounds.midY - 3.5))
+    color.setStroke(); p.stroke()
+}
+
 class GridButton: NSButton {
     var drawsGridEdges = true
     var drawsBottomEdge = true
@@ -163,6 +174,8 @@ class GridButton: NSButton {
             drawHistoryClock(in: bounds, color: attrs[.foregroundColor] as! NSColor)
         } else if title == "←" {
             drawBackArrow(in: bounds, color: attrs[.foregroundColor] as! NSColor)
+        } else if title == "↑↓" {
+            drawSortArrows(in: bounds, color: attrs[.foregroundColor] as! NSColor)
         } else {
             text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2), withAttributes: attrs)
         }
@@ -180,9 +193,7 @@ final class AppListView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         panelBackground.setFill(); NSBezierPath(rect: bounds).fill()
         guard let owner = owner else { return }
-        let rows = (owner.ledger.apps ?? [:]).sorted {
-            ($0.value.lastUsed ?? 0) == ($1.value.lastUsed ?? 0) ? $0.value.seconds > $1.value.seconds : ($0.value.lastUsed ?? 0) > ($1.value.lastUsed ?? 0)
-        }
+        let rows = owner.sortedUsage(owner.ledger.apps ?? [:])
         let total = rows.reduce(0) { $0 + $1.value.seconds }
         let attrs: [NSAttributedString.Key: Any] = [.font: interfaceFont, .foregroundColor: panelText]
         if rows.isEmpty {
@@ -301,6 +312,7 @@ final class RatioView: NSView {
     var selectedTab = 0
     var reviewingPending = false
     let notifications = GridButton(title: "", target: nil, action: nil)
+    let sortOrder = GridButton(title: "↑↓", target: nil, action: nil)
     let ratioTab = GridButton(title: "Ratio", target: nil, action: nil)
     let appsTab = GridButton(title: "Apps", target: nil, action: nil)
     let appScroll = NSScrollView()
@@ -344,11 +356,17 @@ final class RatioView: NSView {
         brand.font = interfaceFont; brand.textColor = .gray; brand.alignment = .right
         brand.frame = NSRect(x: 276, y: 365, width: 68, height: 18); addSubview(brand)
         let notificationPixel = 1 / (NSScreen.main?.backingScaleFactor ?? 2)
-        notifications.frame = NSRect(x: 272 + notificationPixel, y: 264 + notificationPixel, width: 88 - notificationPixel, height: 44 - notificationPixel)
+        notifications.frame = NSRect(x: 272 + notificationPixel, y: 264 + notificationPixel, width: 44 - notificationPixel, height: 44 - notificationPixel)
         notifications.drawsGridEdges = false
         notifications.target = self; notifications.action = #selector(togglePending)
         notifications.font = interfaceFont; notifications.isBordered = false
         addSubview(notifications)
+        sortOrder.frame = NSRect(x: 316 + notificationPixel, y: 264 + notificationPixel, width: 44 - notificationPixel, height: 44 - notificationPixel)
+        sortOrder.drawsGridEdges = false
+        sortOrder.invertsWhenHighlighted = false
+        sortOrder.target = self; sortOrder.action = #selector(toggleSort)
+        sortOrder.font = interfaceFont; sortOrder.isBordered = false
+        addSubview(sortOrder)
         totals.frame = NSRect(x: 16, y: 269, width: 328, height: 65)
         context.frame = NSRect(x: 16, y: 277, width: 156, height: 18)
         context.textColor = .gray
@@ -427,12 +445,20 @@ final class RatioView: NSView {
         theme.setAccessibilityLabel(lightMode ? "Switch to dark mode" : "Switch to light mode")
         theme.toolTip = lightMode ? "Dark mode" : "Light mode"
         reviewSignature = ""; caretDivider?.needsDisplay = true
-        notifications.needsDisplay = true; needsDisplay = true
+        notifications.needsDisplay = true; sortOrder.needsDisplay = true; needsDisplay = true
     }
     @objc func togglePending() {
         reviewingPending.toggle()
         reviewScroll.contentView.scroll(to: .zero)
         owner?.render()
+    }
+    @objc func toggleSort() {
+        guard let owner = owner, !showingHistory else { return }
+        owner.sortNewest.toggle()
+        owner.defaults.set(owner.sortNewest, forKey: "sortNewest")
+        reviewSignature = ""
+        reviewScroll.contentView.scroll(to: .zero)
+        owner.render()
     }
     @objc func showReview() { selectedTab = 2; owner?.render() }
     @objc func showRatio() { selectedTab = 0; owner?.render() }
@@ -455,7 +481,7 @@ final class RatioView: NSView {
         history.state = showingHistory ? .on : .off
         if showingHistory {
             context.stringValue = "HISTORY"
-            notifications.isHidden = true
+            notifications.isHidden = true; sortOrder.isHidden = true
             historyList.owner = owner
             let count = owner?.historyEntries().count ?? 0
             trackedTotal.stringValue = "\(count) DAY\(count == 1 ? "" : "S")"
@@ -463,8 +489,10 @@ final class RatioView: NSView {
             historyList.setFrameSize(NSSize(width: 360, height: max(220, count * 44)))
             historyList.needsDisplay = true
         } else {
-            notifications.isHidden = false
+            notifications.isHidden = false; sortOrder.isHidden = false
             trackedTotal.frame = NSRect(x: 180, y: 277, width: 84, height: 18)
+            let appTotal = (owner?.ledger.apps ?? [:]).values.reduce(0) { $0 + $1.seconds }
+            trackedTotal.stringValue = owner?.duration(appTotal) ?? ""
         }
         let count = owner?.pendingSites.count ?? 0
         notifications.title = count > 0 ? "! \(count)" : "✓"
@@ -473,15 +501,19 @@ final class RatioView: NSView {
         notifications.toolTip = count > 0 ? "\(count) app\(count == 1 ? " needs" : "s need") categorizing" : "All apps categorized"
         notifications.setAccessibilityLabel(notifications.toolTip)
         notifications.needsDisplay = true
-        let pending = (owner?.ledger.apps ?? [:]).filter { !reviewingPending || ($0.value.unclassified ?? 0) >= 1 }.sorted {
-            ($0.value.lastUsed ?? 0) == ($1.value.lastUsed ?? 0) ? $0.value.seconds > $1.value.seconds : ($0.value.lastUsed ?? 0) > ($1.value.lastUsed ?? 0)
-        }
+        let newest = owner?.sortNewest ?? true
+        sortOrder.title = "↑↓"
+        sortOrder.toolTip = newest ? "Sorted by newest" : "Sorted by time used"
+        sortOrder.setAccessibilityLabel(sortOrder.toolTip)
+        sortOrder.needsDisplay = true
+        let visible = (owner?.ledger.apps ?? [:]).filter { !reviewingPending || ($0.value.unclassified ?? 0) >= 1 }
+        let pending = owner?.sortedUsage(visible) ?? []
         func selectedMode(_ id: String) -> String? {
             guard let owner = owner else { return nil }
             if id == owner.activeID { return owner.mode }
             return owner.rules[id] ?? owner.builtIns[id] ?? (id.hasPrefix("site:") ? owner.siteMode(String(id.dropFirst(5))) : nil)
         }
-        let signature = pending.map { $0.key + ":" + (selectedMode($0.key) ?? "?") }.joined(separator: "|") + (owner?.activeID ?? "") + String(reviewingPending)
+        let signature = pending.map { $0.key + ":" + (selectedMode($0.key) ?? "?") }.joined(separator: "|") + (owner?.activeID ?? "") + String(reviewingPending) + String(newest)
         if signature != reviewSignature {
             reviewSignature = signature
             reviewList.subviews.forEach { $0.removeFromSuperview() }
@@ -535,7 +567,7 @@ final class RatioView: NSView {
         ratioTab.state = selectedTab == 0 ? .on : .off; appsTab.state = selectedTab == 0 ? .off : .on
         let height = max(244, (owner?.ledger.apps?.count ?? 0) * 56)
         appList.setFrameSize(NSSize(width: 360, height: height)); appList.needsDisplay = true
-        for button in [ratioTab, appsTab, consume, create, pause, history, forget, quit, theme] { button.needsDisplay = true }
+        for button in [ratioTab, appsTab, consume, create, pause, history, forget, quit, theme, sortOrder] { button.needsDisplay = true }
     }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
@@ -543,7 +575,10 @@ final class RatioView: NSView {
         let pixel = 1 / (window?.backingScaleFactor ?? 2)
         for y: CGFloat in [44, 264, 352] { hairline(NSRect(x: 0, y: y, width: 360, height: pixel)) }
         // Dividers are inset one physical pixel into adjacent cells to remain visible.
-        hairline(NSRect(x: 272, y: 264, width: pixel, height: 44))
+        if !showingHistory {
+            hairline(NSRect(x: 272, y: 264, width: pixel, height: 44))
+            hairline(NSRect(x: 316, y: 264, width: pixel, height: 44))
+        }
         guard let o = owner, selectedTab == 0 else { return }
         for y: CGFloat in [308, 352] { hairline(NSRect(x: 0, y: y, width: 360, height: pixel)) }
 
@@ -761,8 +796,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var lastTelemetryReport = Date.distantPast
     var chromeSessionSites = Set<String>()
     var reviewWork: DispatchWorkItem?
+    var sortNewest = true
+    func sortedUsage(_ apps: [String: AppUsage]) -> [(key: String, value: AppUsage)] {
+        apps.sorted { lhs, rhs in
+            if sortNewest {
+                let left = lhs.value.lastUsed ?? 0, right = rhs.value.lastUsed ?? 0
+                return left == right ? lhs.value.seconds > rhs.value.seconds : left > right
+            }
+            if lhs.value.seconds == rhs.value.seconds {
+                return (lhs.value.lastUsed ?? 0) > (rhs.value.lastUsed ?? 0)
+            }
+            return lhs.value.seconds > rhs.value.seconds
+        }
+    }
     var pendingSites: [(key: String, value: AppUsage)] {
-        (ledger.apps ?? [:]).filter { ($0.value.unclassified ?? 0) >= 1 }.sorted { ($0.value.lastUsed ?? 0) > ($1.value.lastUsed ?? 0) }
+        sortedUsage((ledger.apps ?? [:]).filter { ($0.value.unclassified ?? 0) >= 1 })
     }
     @objc func reviewSite(_ button: ReviewButton) {
         tick()
@@ -785,6 +833,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let data = defaults.data(forKey: "ledger"), let saved = try? JSONDecoder().decode(Ledger.self, from: data) { ledger = saved }
         if let data = defaults.data(forKey: "history"), let saved = try? JSONDecoder().decode([DaySummary].self, from: data) { history = saved }
         rules = (defaults.dictionary(forKey: "rules") as? [String: String] ?? [:]).filter { $0.value != "neutral" }
+        sortNewest = defaults.object(forKey: "sortNewest") as? Bool ?? true
         telemetrySeconds = defaults.double(forKey: "anonymousTrackedSeconds")
         telemetryEnabled = defaults.object(forKey: "anonymousTotalsEnabled") == nil || defaults.bool(forKey: "anonymousTotalsEnabled")
         telemetryInstallID = defaults.string(forKey: "anonymousInstallID") ?? UUID().uuidString.lowercased()
@@ -1064,7 +1113,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let tracking = !paused && !sleeping && !idle
         let liveStatus = tracking ? "TRACKING" : state
         panel.context.stringValue = liveStatus
-        panel.trackedTotal.stringValue = duration((ledger.apps ?? [:]).values.reduce(0) { $0 + $1.seconds })
         panel.note.stringValue = paused ? "Tracking paused. Click Resume to count." : sleeping || idle ? "Away · counting resumes with activity." : mode == nil ? "App time is counting. Choose a mode to include it in your ratio." : state + " · time updates every second.\nClick a mode to correct it."
         panel.pause.title = paused ? "▶" : "Ⅱ"
         panel.forget.title = resetUndo == nil ? "RESET" : "UNDO"
@@ -1119,6 +1167,17 @@ if CommandLine.arguments.contains("--preview") {
     precondition(classifier.siteMode("notx.com") == nil)
     precondition(classifier.siteMode("x.com.example.org") == nil)
     print("PASS: website classification and hostname boundaries")
+    let sorter = AppDelegate()
+    sorter.ledger.apps = [
+        "old-long": AppUsage(name: "Xcode", seconds: 50, lastUsed: 1),
+        "new-short": AppUsage(name: "Calendar", seconds: 2, lastUsed: 3),
+        "mid": AppUsage(name: "Safari", seconds: 20, lastUsed: 2)
+    ]
+    sorter.sortNewest = true
+    precondition(sorter.sortedUsage(sorter.ledger.apps ?? [:]).map(\.key) == ["new-short", "mid", "old-long"])
+    sorter.sortNewest = false
+    precondition(sorter.sortedUsage(sorter.ledger.apps ?? [:]).map(\.key) == ["old-long", "mid", "new-short"])
+    print("PASS: app list sort newest vs most used")
     var l = Ledger(day: "test")
     l.record(2, mode: "create"); l.record(1, mode: "consume"); l.record(2, mode: nil)
     l.record(100, mode: "create"); l.record(-1, mode: "consume")
